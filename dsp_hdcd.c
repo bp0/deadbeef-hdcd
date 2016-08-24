@@ -34,10 +34,9 @@
 #include <string.h>
 #include <assert.h>
 #include <deadbeef/deadbeef.h>
-#include <hdcd/hdcd_decode2.h>
+#include <hdcd/hdcd_simple.h>
 
 enum {
-    HDCD_PARAM_PROCESS_STEREO,
     HDCD_PARAM_ANALYZE_MODE,
     HDCD_PARAM_COUNT
 };
@@ -47,10 +46,9 @@ static DB_dsp_t plugin;
 
 typedef struct {
     ddb_dsp_context_t ctx;
-    hdcd_state_stereo_t state_stereo;
-    hdcd_detection_data_t detect;
 
-    int process_stereo;
+    hdcd_simple_t *hdcd;
+    int amode;
 
     int log_detect_data_period;
     int log_detect_data_counter;
@@ -62,13 +60,11 @@ dsp_hdcd_open (void) {
     DDB_INIT_DSP_CONTEXT (hdcdctx,ddb_hdcdcontext_t,&plugin);
 
     // initialize
-    hdcdctx->process_stereo = 1; // also set by config
-
     hdcdctx->log_detect_data_counter =
         hdcdctx->log_detect_data_period = 441000; // 10 sec.
+    hdcdctx->amode = 0; // will be set by config
 
-    hdcd_reset_stereo(&hdcdctx->state_stereo, 44100);
-    hdcd_detect_reset(&hdcdctx->detect);
+    hdcdctx->hdcd = shdcd_new();
 
     return (ddb_dsp_context_t *)hdcdctx;
 }
@@ -78,6 +74,7 @@ dsp_hdcd_close (ddb_dsp_context_t *ctx) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
 
     // free instance-specific allocations
+    shdcd_free(hdcdctx->hdcd);
 
     free (hdcdctx);
 }
@@ -86,6 +83,8 @@ void
 dsp_hdcd_reset (ddb_dsp_context_t *ctx) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     // use this method to flush dsp buffers, reset filters, etc
+
+    shdcd_reset(hdcdctx->hdcd);
 }
 
 /*
@@ -130,20 +129,13 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
         s32_samples[i] = samples[i] * 0x8000U;
     }
 
-    // process will convert s16 to s32
-    if (hdcdctx->process_stereo) {
-        hdcd_process_stereo(&hdcdctx->state_stereo, s32_samples, nframes);
-    } else {
-        hdcd_process(&hdcdctx->state_stereo.channel[0], s32_samples, nframes, 2);
-        hdcd_process(&hdcdctx->state_stereo.channel[1], s32_samples + 1, nframes, 2);
-    }
-    hdcd_detect_stereo(&hdcdctx->state_stereo, &hdcdctx->detect);
+    shdcd_process(hdcdctx->hdcd, s32_samples, nframes);
 
     if (hdcdctx->log_detect_data_period) {
         hdcdctx->log_detect_data_counter -= nframes;
         if (hdcdctx->log_detect_data_counter < 0) {
             hdcdctx->log_detect_data_counter = hdcdctx->log_detect_data_period;
-            hdcd_detect_str(&hdcdctx->detect, dstr, sizeof(dstr));
+            shdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
             printf("%s\n", dstr);
         }
     }
@@ -165,8 +157,6 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
 const char *
 dsp_hdcd_get_param_name (int p) {
     switch (p) {
-    case HDCD_PARAM_PROCESS_STEREO:
-        return "Process Stereo";
     case HDCD_PARAM_ANALYZE_MODE:
         return "Analyze Mode";
     default:
@@ -180,8 +170,8 @@ dsp_hdcd_num_params (void) {
     return HDCD_PARAM_COUNT;
 }
 
-static const char am_str[6][4] = {
-    "off", "pe", "lle", "cdt", "tgm", "???"
+static const char am_str[8][5] = {
+    "off", "lle", "pe", "cdt", "tgm", "pel", "ltgm", "?"
 };
 
 void
@@ -190,14 +180,11 @@ dsp_hdcd_set_param (ddb_dsp_context_t *ctx, int p, const char *val) {
     int i;
     printf("set_param: p: %d, val: '%s'\n", p, val);
     switch (p) {
-    case HDCD_PARAM_PROCESS_STEREO:
-        hdcdctx->process_stereo = atoi (val);
-        break;
     case HDCD_PARAM_ANALYZE_MODE:
-        for (i = 0; i < 5; i++) {
+        for (i = 0; i < 8; i++) {
             if (strcmp(val, am_str[i]) == 0) {
-                printf(" ...ana_mode = %d\n", i);
-                hdcd_set_analyze_mode_stereo(&hdcdctx->state_stereo, i);
+                printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], shdcd_analyze_mode_desc(i) );
+                shdcd_analyze_mode(hdcdctx->hdcd, i);
                 return;
             }
         }
@@ -213,12 +200,9 @@ dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
     int amode;
     printf("get_param: p: %d ...\n", p);
     switch (p) {
-    case HDCD_PARAM_PROCESS_STEREO:
-        snprintf (val, sz, "%d", hdcdctx->process_stereo);
-        break;
     case HDCD_PARAM_ANALYZE_MODE:
-        amode = hdcdctx->state_stereo.ana_mode;
-        if (amode > 5) amode = 5;
+        amode = hdcdctx->amode;
+        if (amode > 7) amode = 7;
         snprintf (val, sz, "%s", am_str[amode]);
         break;
     default:
@@ -228,8 +212,7 @@ dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
 }
 
 static const char settings_dlg[] =
-    "property \"Process Stereo\" checkbox hdcd.process_stereo 1;\n"
-    "property \"Analyze Mode\" select[5] hdcd.analyze_mode 0 off pe lle cdt tgm;\n"
+    "property \"Analyze Mode\" select[7] hdcd.analyze_mode 0 off lle pe cdt tgm pel ltgm;\n"
 ;
 
 static DB_dsp_t plugin = {
