@@ -47,7 +47,7 @@ static DB_dsp_t plugin;
 typedef struct {
     ddb_dsp_context_t ctx;
 
-    hdcd_simple_t *hdcd;
+    hdcd_simple *hdcd;
     int amode;
 
     int log_detect_data_period;
@@ -64,7 +64,7 @@ dsp_hdcd_open (void) {
         hdcdctx->log_detect_data_period = 441000; // 10 sec.
     hdcdctx->amode = 0; // will be set by config
 
-    hdcdctx->hdcd = shdcd_new();
+    hdcdctx->hdcd = hdcd_new();
 
     return (ddb_dsp_context_t *)hdcdctx;
 }
@@ -74,7 +74,7 @@ dsp_hdcd_close (ddb_dsp_context_t *ctx) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
 
     // free instance-specific allocations
-    shdcd_free(hdcdctx->hdcd);
+    hdcd_free(hdcdctx->hdcd);
 
     free (hdcdctx);
 }
@@ -84,7 +84,7 @@ dsp_hdcd_reset (ddb_dsp_context_t *ctx) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     // use this method to flush dsp buffers, reset filters, etc
 
-    shdcd_reset(hdcdctx->hdcd);
+    hdcd_reset(hdcdctx->hdcd);
 }
 
 /*
@@ -129,13 +129,13 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
         s32_samples[i] = samples[i] * 0x8000U;
     }
 
-    shdcd_process(hdcdctx->hdcd, s32_samples, nframes);
+    hdcd_process(hdcdctx->hdcd, s32_samples, nframes);
 
     if (hdcdctx->log_detect_data_period) {
         hdcdctx->log_detect_data_counter -= nframes;
         if (hdcdctx->log_detect_data_counter < 0) {
             hdcdctx->log_detect_data_counter = hdcdctx->log_detect_data_period;
-            shdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
+            hdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
             printf("%s\n", dstr);
         }
     }
@@ -183,8 +183,8 @@ dsp_hdcd_set_param (ddb_dsp_context_t *ctx, int p, const char *val) {
     case HDCD_PARAM_ANALYZE_MODE:
         for (i = 0; i < 8; i++) {
             if (strcmp(val, am_str[i]) == 0) {
-                printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], shdcd_analyze_mode_desc(i) );
-                shdcd_analyze_mode(hdcdctx->hdcd, i);
+                printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], hdcd_str_analyze_mode_desc(i) );
+                hdcd_analyze_mode(hdcdctx->hdcd, i);
                 return;
             }
         }
