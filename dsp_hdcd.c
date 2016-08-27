@@ -85,28 +85,12 @@ dsp_hdcd_reset (ddb_dsp_context_t *ctx) {
     // use this method to flush dsp buffers, reset filters, etc
 
     hdcd_reset(hdcdctx->hdcd);
+    hdcd_analyze_mode(hdcdctx->hdcd, hdcdctx->amode);
 }
-
-/*
-ddb_waveformat_t * dsp_hdcd_query_formats (ddb_dsp_context_t *ctx) {
-    ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
-    static const ddb_waveformat_t cdda_fmt[] = {
-            {
-            .bps = 16,
-            .channels = 2,
-            .samplerate = 44100,
-            .channelmask = 0x3
-            },
-            {NULL},
-        };
-    return &cdda_fmt;
-}
-*/
 
 int
 dsp_hdcd_can_bypass (ddb_dsp_context_t *ctx, ddb_waveformat_t *fmt) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
-    //if (fmt->bps != 16) return 1;
     if (fmt->channels != 2) return 1;
     if (fmt->samplerate != 44100) return 1;
     return 0;
@@ -118,7 +102,6 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
     int32_t *s32_samples;
     char dstr[256];
 
-    //if (fmt->bps != 16) return nframes;
     if (fmt->channels != 2) return nframes;
     if (fmt->samplerate != 44100) return nframes;
 
@@ -129,6 +112,7 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
         s32_samples[i] = samples[i] * 0x8000U;
     }
 
+    // processing expands into s32
     hdcd_process(hdcdctx->hdcd, s32_samples, nframes);
 
     if (hdcdctx->log_detect_data_period) {
@@ -181,13 +165,11 @@ dsp_hdcd_set_param (ddb_dsp_context_t *ctx, int p, const char *val) {
     printf("set_param: p: %d, val: '%s'\n", p, val);
     switch (p) {
     case HDCD_PARAM_ANALYZE_MODE:
-        for (i = 0; i < 8; i++) {
-            if (strcmp(val, am_str[i]) == 0) {
-                printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], hdcd_str_analyze_mode_desc(i) );
-                hdcd_analyze_mode(hdcdctx->hdcd, i);
-                return;
-            }
-        }
+        i = atoi (val);
+        if (i < 0 || i > 6 ) i = 0;
+        printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], hdcd_str_analyze_mode_desc(i) );
+        hdcd_analyze_mode(hdcdctx->hdcd, i);
+        hdcdctx->amode = i;
         break;
     default:
         fprintf (stderr, "hdcd_param: invalid param index (%d)\n", p);
@@ -203,7 +185,7 @@ dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
     case HDCD_PARAM_ANALYZE_MODE:
         amode = hdcdctx->amode;
         if (amode > 7) amode = 7;
-        snprintf (val, sz, "%s", am_str[amode]);
+        snprintf (val, sz, "%d", amode);
         break;
     default:
         fprintf (stderr, "hdcd_get_param: invalid param index (%d)\n", p);
@@ -224,7 +206,6 @@ static DB_dsp_t plugin = {
     .close = dsp_hdcd_close,
     .process = dsp_hdcd_process,
     .can_bypass = dsp_hdcd_can_bypass,
-    //.query_formats = dsp_hdcd_query_formats,
     .plugin.version_major = 0,
     .plugin.version_minor = 4,
     .plugin.type = DB_PLUGIN_DSP,
