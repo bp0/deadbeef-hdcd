@@ -33,12 +33,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 #include <deadbeef/deadbeef.h>
 #include <hdcd/hdcd_simple.h>
 
 enum {
-    HDCD_PARAM_ANALYZE_MODE,
-    HDCD_PARAM_COUNT
+    HDCD_ENABLED             = 0,
+    HDCD_PARAM_ANALYZE_MODE  = 1,
+    HDCD_PARAM_COUNT         = 2
 };
 
 static DB_functions_t *deadbeef;
@@ -49,6 +51,9 @@ typedef struct {
 
     hdcd_simple *hdcd;
     int amode;
+    int enabled;
+
+    uint64_t samples_since_reset;
 
     int log_detect_data_period;
     int log_detect_data_counter;
@@ -63,6 +68,9 @@ dsp_hdcd_open (void) {
     hdcdctx->log_detect_data_counter =
         hdcdctx->log_detect_data_period = 441000; // 10 sec.
     hdcdctx->amode = 0; // will be set by config
+    hdcdctx->enabled = 1; // will be set by config
+
+    hdcdctx->samples_since_reset = 0;
 
     hdcdctx->hdcd = hdcd_new();
 
@@ -75,7 +83,6 @@ dsp_hdcd_close (ddb_dsp_context_t *ctx) {
 
     // free instance-specific allocations
     hdcd_free(hdcdctx->hdcd);
-
     free (hdcdctx);
 }
 
@@ -86,6 +93,7 @@ dsp_hdcd_reset (ddb_dsp_context_t *ctx) {
 
     hdcd_reset(hdcdctx->hdcd);
     hdcd_analyze_mode(hdcdctx->hdcd, hdcdctx->amode);
+    hdcdctx->samples_since_reset = 0;
 }
 
 int
@@ -108,20 +116,25 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
     // convert to s16
     s32_samples = malloc(nframes * fmt->channels * sizeof(int32_t));
     if (!s32_samples) return nframes;
-    for (int i = 0; i < nframes * fmt->channels; i++) {
+    for (int i = 0; i < nframes * fmt->channels; i++)
         s32_samples[i] = samples[i] * 0x8000U;
-    }
 
-    // processing expands into s32
-    hdcd_process(hdcdctx->hdcd, s32_samples, nframes);
+    if (hdcdctx->enabled) {
+        // processing expands into s32
+        hdcd_process(hdcdctx->hdcd, s32_samples, nframes);
+        hdcdctx->samples_since_reset += nframes * fmt->channels;
 
-    if (hdcdctx->log_detect_data_period) {
-        hdcdctx->log_detect_data_counter -= nframes;
-        if (hdcdctx->log_detect_data_counter < 0) {
-            hdcdctx->log_detect_data_counter = hdcdctx->log_detect_data_period;
-            hdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
-            printf("%s\n", dstr);
+        if (hdcdctx->log_detect_data_period) {
+            hdcdctx->log_detect_data_counter -= nframes;
+            if (hdcdctx->log_detect_data_counter < 0) {
+                hdcdctx->log_detect_data_counter = hdcdctx->log_detect_data_period;
+                hdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
+                fprintf(stderr, "[%" PRIu64 "] %s\n", hdcdctx->samples_since_reset, dstr);
+            }
         }
+    } else {
+        for (int i = 0; i < nframes * fmt->channels; i++)
+            s32_samples[i] <<= 15;
     }
 
     // convert s32 back to float
@@ -141,6 +154,8 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
 const char *
 dsp_hdcd_get_param_name (int p) {
     switch (p) {
+    case HDCD_ENABLED:
+        return "Enabled";
     case HDCD_PARAM_ANALYZE_MODE:
         return "Analyze Mode";
     default:
@@ -162,12 +177,14 @@ void
 dsp_hdcd_set_param (ddb_dsp_context_t *ctx, int p, const char *val) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     int i;
-    printf("set_param: p: %d, val: '%s'\n", p, val);
     switch (p) {
+    case HDCD_ENABLED:
+        i = atoi (val);
+        hdcdctx->enabled = i;
+        break;
     case HDCD_PARAM_ANALYZE_MODE:
         i = atoi (val);
         if (i < 0 || i > 6 ) i = 0;
-        printf(" ...ana_mode = [%d:%s] %s\n", i, am_str[i], hdcd_str_analyze_mode_desc(i) );
         hdcd_analyze_mode(hdcdctx->hdcd, i);
         hdcdctx->amode = i;
         break;
@@ -180,8 +197,10 @@ void
 dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     int amode;
-    printf("get_param: p: %d ...\n", p);
     switch (p) {
+    case HDCD_ENABLED:
+        snprintf (val, sz, "%d", hdcdctx->enabled);
+        break;
     case HDCD_PARAM_ANALYZE_MODE:
         amode = hdcdctx->amode;
         if (amode > 7) amode = 7;
@@ -190,11 +209,11 @@ dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
     default:
         fprintf (stderr, "hdcd_get_param: invalid param index (%d)\n", p);
     }
-    printf("... val: %s\n", val);
 }
 
 static const char settings_dlg[] =
-    "property \"Analyze Mode\" select[7] hdcd.analyze_mode 0 off lle pe cdt tgm pel ltgm;\n"
+    "property \"Enabled\" checkbox 0 1;\n"
+    "property \"Analyze Mode\" select[7] 1 0 off lle pe cdt tgm pel ltgm;\n"
 ;
 
 static DB_dsp_t plugin = {
@@ -207,7 +226,7 @@ static DB_dsp_t plugin = {
     .process = dsp_hdcd_process,
     .can_bypass = dsp_hdcd_can_bypass,
     .plugin.version_major = 0,
-    .plugin.version_minor = 4,
+    .plugin.version_minor = 5,
     .plugin.type = DB_PLUGIN_DSP,
     .plugin.id = "hdcd",
     .plugin.name = "HDCD decoder",
