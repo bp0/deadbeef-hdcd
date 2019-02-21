@@ -37,6 +37,8 @@
 #include <deadbeef/deadbeef.h>
 #include <hdcd/hdcd_simple.h>
 
+#define hdcd_msg(fmt, ...) fprintf (stderr, "[%s] " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
+
 enum {
     HDCD_ENABLED             = 0,
     HDCD_PARAM_ANALYZE_MODE  = 1,
@@ -57,6 +59,8 @@ typedef struct {
 
     int log_detect_data_period;
     int log_detect_data_counter;
+
+    int not_16bit;
 } ddb_hdcdcontext_t;
 
 ddb_dsp_context_t*
@@ -71,6 +75,7 @@ dsp_hdcd_open (void) {
     hdcdctx->enabled = 1; // will be set by config
 
     hdcdctx->samples_since_reset = 0;
+    hdcdctx->not_16bit = 0;
 
     hdcdctx->hdcd = hdcd_new();
 
@@ -94,6 +99,7 @@ dsp_hdcd_reset (ddb_dsp_context_t *ctx) {
     hdcd_reset(hdcdctx->hdcd);
     hdcd_analyze_mode(hdcdctx->hdcd, hdcdctx->amode);
     hdcdctx->samples_since_reset = 0;
+    hdcdctx->not_16bit = 0;
 }
 
 int
@@ -101,6 +107,7 @@ dsp_hdcd_can_bypass (ddb_dsp_context_t *ctx, ddb_waveformat_t *fmt) {
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     if (fmt->channels != 2) return 1;
     if (fmt->samplerate != 44100) return 1;
+    if (hdcdctx->not_16bit) return 1;
     return 0;
 }
 
@@ -109,15 +116,31 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
     ddb_hdcdcontext_t *hdcdctx = (ddb_hdcdcontext_t *)ctx;
     int32_t *s32_samples;
     char dstr[256];
+    int not_16bit = 0;
 
     if (fmt->channels != 2) return nframes;
     if (fmt->samplerate != 44100) return nframes;
+    if (hdcdctx->not_16bit) return nframes;
 
     // convert to s16
     s32_samples = malloc(nframes * fmt->channels * sizeof(int32_t));
     if (!s32_samples) return nframes;
-    for (int i = 0; i < nframes * fmt->channels; i++)
+    for (int i = 0; i < nframes * fmt->channels; i++) {
+        if (samples[i] > 65535 || samples[i] < -65536)
+            not_16bit++;
         s32_samples[i] = samples[i] * 0x8000U;
+    }
+
+    /* deadbeef converts all input to 32bit float for DSPs, so is_float and
+     * bps aren't useful here. Try and detect if there are any sample values
+     * outside of 16bit range and then stop decoding HDCD. */
+
+    if (not_16bit) {
+        hdcd_msg("not_16bit: %d [%d]", not_16bit, hdcdctx->not_16bit);
+        hdcdctx->not_16bit = 1;
+        free(s32_samples);
+        return nframes;
+    }
 
     if (hdcdctx->enabled) {
         // processing expands into s32
@@ -129,7 +152,7 @@ dsp_hdcd_process (ddb_dsp_context_t *ctx, float *samples, int nframes, int maxfr
             if (hdcdctx->log_detect_data_counter < 0) {
                 hdcdctx->log_detect_data_counter = hdcdctx->log_detect_data_period;
                 hdcd_detect_str(hdcdctx->hdcd, dstr, sizeof(dstr));
-                fprintf(stderr, "[%" PRIu64 "] %s\n", hdcdctx->samples_since_reset, dstr);
+                hdcd_msg("[%" PRIu64 "] %s", hdcdctx->samples_since_reset, dstr);
             }
         }
     } else {
@@ -159,7 +182,7 @@ dsp_hdcd_get_param_name (int p) {
     case HDCD_PARAM_ANALYZE_MODE:
         return "Analyze Mode";
     default:
-        fprintf (stderr, "hdcd_param_name: invalid param index (%d)\n", p);
+        hdcd_msg("invalid param index (%d)", p);
     }
     return NULL;
 }
@@ -189,7 +212,7 @@ dsp_hdcd_set_param (ddb_dsp_context_t *ctx, int p, const char *val) {
         hdcdctx->amode = i;
         break;
     default:
-        fprintf (stderr, "hdcd_param: invalid param index (%d)\n", p);
+        hdcd_msg("invalid param index (%d)", p);
     }
 }
 
@@ -207,7 +230,7 @@ dsp_hdcd_get_param (ddb_dsp_context_t *ctx, int p, char *val, int sz) {
         snprintf (val, sz, "%d", amode);
         break;
     default:
-        fprintf (stderr, "hdcd_get_param: invalid param index (%d)\n", p);
+        hdcd_msg("invalid param index (%d)", p);
     }
 }
 
